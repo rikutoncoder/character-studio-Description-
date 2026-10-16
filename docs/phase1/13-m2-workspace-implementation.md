@@ -40,7 +40,7 @@ LANへ提供する場合は、承認済みAPI設計のHTTPS/端末認証を先�
 
 - Python unittest: 22件合格（既存M1の17件を含む）
 - Vitest: 6件合格
-- Playwright: デスクトップChromium 4件、スマホ相当Chromium 4件、計8件合格
+- Playwright: デスクトップChromium 4件、スマホ相当Chromium 4件、iPhone相当WebKit 4件、計12件合格
 - Next.js production build・TypeScript検査: 合格
-- Playwright WebKit: ブラウザ実行ファイルがなく未実施。ダウンロードは行っていない
+- Playwright WebKit 26.0: 72.6MiBのブラウザ実行ファイルをユーザー承認後に導入し、4件合格
 - 実機iPhone Safari: 未実施。合格判定には追加確認が必要
