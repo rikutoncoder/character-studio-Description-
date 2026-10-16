@@ -1,0 +1,12 @@
+[project]
+name = "character-studio-generation-agent"
+version = "0.1.0"
+description = "Character Studio local image integrity core"
+requires-python = ">=3.12"
+dependencies = [
+  "Pillow>=12.0,<13",
+  "numpy>=2.3,<3",
+]
+
+[tool.unittest]
+start-directory = "tests"
