@@ -19,7 +19,7 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Database:
@@ -131,7 +131,31 @@ class Database:
                 BEGIN
                     SELECT RAISE(ABORT, 'composite results are immutable');
                 END;
+
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id),
+                    base_version_id TEXT NOT NULL REFERENCES image_versions(id),
+                    revision INTEGER NOT NULL CHECK (revision >= 1),
+                    mask_asset_id TEXT NOT NULL REFERENCES assets(id),
+                    color_guide_asset_id TEXT NOT NULL REFERENCES assets(id),
+                    silhouette_guide_asset_id TEXT NOT NULL REFERENCES assets(id),
+                    feather_inward_px INTEGER NOT NULL CHECK (feather_inward_px BETWEEN 0 AND 64),
+                    layers_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS workspaces_project_idx
+                    ON workspaces(project_id, updated_at);
+                CREATE TRIGGER IF NOT EXISTS workspace_base_immutable
+                BEFORE UPDATE OF project_id, base_version_id ON workspaces
+                BEGIN
+                    SELECT RAISE(ABORT, 'workspace base is immutable');
+                END;
                 """
+            )
+            self.connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (1)"
             )
             self.connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
