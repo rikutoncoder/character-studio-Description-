@@ -223,7 +223,7 @@ export default function WorkspaceEditor({ id }: { id: string }) {
         </div>)}
         <p className="mt-5 text-xs text-slate-400">一本指・Pencil・マウスで描画。二本指で移動と拡大縮小。ズームは画像座標に影響しません。</p>
       </aside>
-      <div ref={container} data-testid="workspace-canvas" className="relative order-1 min-h-0 flex-1 overflow-hidden bg-slate-950 touch-none md:order-2" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={event => finishPointer(event, false)} onPointerCancel={event => finishPointer(event, true)} onWheel={event => { event.preventDefault(); updateView(zoomAt(viewRef.current, local(event as unknown as ReactPointerEvent), Math.exp(-event.deltaY * 0.001), fitScale(area.width, area.height))); }}>
+      <div ref={container} data-testid="workspace-canvas" data-view-scale={view.scale} data-view-x={view.x} data-view-y={view.y} className="relative order-1 min-h-0 flex-1 overflow-hidden bg-slate-950 touch-none md:order-2" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={event => finishPointer(event, false)} onPointerCancel={event => finishPointer(event, true)} onWheel={event => { event.preventDefault(); updateView(zoomAt(viewRef.current, local(event as unknown as ReactPointerEvent), Math.exp(-event.deltaY * 0.001), fitScale(area.width, area.height))); }}>
         {!loading && baseImage && <CanvasView width={area.width} height={area.height} view={view} image={baseImage} buffers={state.buffers} layers={state.layers} />}
         {loading && <p className="absolute left-4 top-4">読み込み中…</p>}
         <span className="pointer-events-none absolute bottom-2 right-3 rounded bg-slate-900/80 px-2 text-xs">{Math.round(view.scale * 100)}% · 832×1216</span>

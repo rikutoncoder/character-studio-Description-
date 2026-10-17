@@ -17,9 +17,16 @@ test('409 keeps the edit and presents both safe choices', async ({ page }) => {
     : route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(workspace) }));
   await page.route('**/api/m2/assets/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==', 'base64') }));
   await page.goto(`/workspace/${workspace.id}`);
-  const box = await page.getByTestId('workspace-canvas').boundingBox();
-  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
-  await page.mouse.down(); await page.mouse.up();
+  const canvas = page.getByTestId('workspace-canvas');
+  await expect(canvas.locator('canvas').first()).toBeAttached();
+  await expect.poll(async () => Number(await canvas.getAttribute('data-view-scale'))).toBeLessThan(1);
+  await canvas.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    const point = { bubbles: true, pointerId: 77, pointerType: 'pen', clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+    element.dispatchEvent(new PointerEvent('pointerdown', point));
+    element.dispatchEvent(new PointerEvent('pointerup', point));
+  });
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled();
   await page.getByRole('button', { name: '保存', exact: true }).click();
   await expect(page.getByRole('alert').filter({ hasText: '別の端末で先に保存' })).toBeVisible();
   await expect(page.getByRole('button', { name: '最新版を読み直す' })).toBeVisible();
