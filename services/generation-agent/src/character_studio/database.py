@@ -19,7 +19,7 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 class Database:
@@ -131,7 +131,113 @@ class Database:
                 BEGIN
                     SELECT RAISE(ABORT, 'composite results are immutable');
                 END;
+
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id),
+                    base_version_id TEXT NOT NULL REFERENCES image_versions(id),
+                    revision INTEGER NOT NULL CHECK (revision >= 1),
+                    mask_asset_id TEXT NOT NULL REFERENCES assets(id),
+                    color_guide_asset_id TEXT NOT NULL REFERENCES assets(id),
+                    silhouette_guide_asset_id TEXT NOT NULL REFERENCES assets(id),
+                    feather_inward_px INTEGER NOT NULL CHECK (feather_inward_px BETWEEN 0 AND 64),
+                    layers_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS workspaces_project_idx
+                    ON workspaces(project_id, updated_at);
+                CREATE TRIGGER IF NOT EXISTS workspace_base_immutable
+                BEFORE UPDATE OF project_id, base_version_id ON workspaces
+                BEGIN
+                    SELECT RAISE(ABORT, 'workspace base is immutable');
+                END;
+
+                CREATE TABLE IF NOT EXISTS edit_operations (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id),
+                    source_version_id TEXT NOT NULL REFERENCES image_versions(id),
+                    source_asset_id TEXT NOT NULL REFERENCES assets(id),
+                    mask_id TEXT NOT NULL REFERENCES masks(id),
+                    color_guide_asset_id TEXT NOT NULL REFERENCES assets(id),
+                    silhouette_guide_asset_id TEXT NOT NULL REFERENCES assets(id),
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    workspace_revision INTEGER NOT NULL,
+                    operation_type TEXT NOT NULL CHECK (operation_type IN ('COLOR_CHANGE','STRUCTURE_ADD')),
+                    prompt TEXT NOT NULL,
+                    negative_prompt TEXT NOT NULL,
+                    preset_json TEXT NOT NULL,
+                    workflow_hash TEXT NOT NULL,
+                    model_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TRIGGER IF NOT EXISTS edit_operations_immutable
+                BEFORE UPDATE ON edit_operations
+                BEGIN SELECT RAISE(ABORT, 'edit operations are immutable'); END;
+
+                CREATE TABLE IF NOT EXISTS generation_jobs (
+                    id TEXT PRIMARY KEY,
+                    operation_id TEXT NOT NULL REFERENCES edit_operations(id),
+                    project_id TEXT NOT NULL REFERENCES projects(id),
+                    idempotency_key TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(project_id, idempotency_key)
+                );
+                CREATE INDEX IF NOT EXISTS generation_jobs_queue_idx
+                    ON generation_jobs(state, created_at, id);
+                CREATE UNIQUE INDEX IF NOT EXISTS generation_one_active_idx
+                    ON generation_jobs ((1)) WHERE state IN
+                    ('LEASED','RUNNING','RAW_OUTPUT_READY','COMPOSITING','VALIDATING');
+                CREATE TABLE IF NOT EXISTS job_attempts (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL REFERENCES generation_jobs(id),
+                    number INTEGER NOT NULL CHECK (number >= 1),
+                    seed INTEGER NOT NULL,
+                    state TEXT NOT NULL,
+                    comfy_prompt_id TEXT,
+                    workflow_hash TEXT NOT NULL,
+                    model_hash TEXT NOT NULL,
+                    raw_asset_id TEXT REFERENCES assets(id),
+                    strict_asset_id TEXT REFERENCES assets(id),
+                    composite_result_id TEXT REFERENCES composite_results(id),
+                    error_code TEXT,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    UNIQUE(job_id, number)
+                );
+                CREATE TABLE IF NOT EXISTS job_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL REFERENCES generation_jobs(id),
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS job_events_job_idx ON job_events(job_id, id);
+                CREATE TABLE IF NOT EXISTS candidates (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL REFERENCES generation_jobs(id),
+                    attempt_id TEXT NOT NULL UNIQUE REFERENCES job_attempts(id),
+                    source_version_id TEXT NOT NULL REFERENCES image_versions(id),
+                    mask_id TEXT NOT NULL REFERENCES masks(id),
+                    raw_asset_id TEXT NOT NULL REFERENCES assets(id),
+                    strict_asset_id TEXT NOT NULL REFERENCES assets(id),
+                    composite_result_id TEXT NOT NULL REFERENCES composite_results(id),
+                    state TEXT NOT NULL CHECK (state IN ('REVIEW_PENDING','ADOPTED','REJECTED','STALE')),
+                    adopted_version_id TEXT REFERENCES image_versions(id),
+                    adoption_key TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 """
+            )
+            self.connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (1)"
+            )
+            self.connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)"
             )
             self.connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",

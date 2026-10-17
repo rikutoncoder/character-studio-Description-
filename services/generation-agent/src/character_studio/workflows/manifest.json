@@ -1,0 +1,36 @@
+{
+  "modelPath": "",
+  "modelSha256": "e3c47aedb06418c6c331443cd89f2b3b3b34b7ed2102a3d4c4408a8d35aad6b0",
+  "workflows": {
+    "COLOR_CHANGE": {
+      "path": "color-change-v1.json",
+      "sha256": "928ca936fade66e777c00b527857ae6dfb766fc81952aa84770821a9e7fbe8d3",
+      "outputNode": "9",
+      "bindings": {
+        "guideImage": { "node": "4", "input": "image" },
+        "mask": { "node": "5", "input": "image" },
+        "prompt": { "node": "2", "input": "text" },
+        "negativePrompt": { "node": "3", "input": "text" },
+        "seed": { "node": "7", "input": "seed" },
+        "steps": { "node": "7", "input": "steps" },
+        "cfg": { "node": "7", "input": "cfg" },
+        "denoise": { "node": "7", "input": "denoise" }
+      }
+    },
+    "STRUCTURE_ADD": {
+      "path": "structure-add-v1.json",
+      "sha256": "2976a66fa034f791a6164131b5bbe4259123177fc891ee017d493571dc965a74",
+      "outputNode": "9",
+      "bindings": {
+        "guideImage": { "node": "4", "input": "image" },
+        "mask": { "node": "5", "input": "image" },
+        "prompt": { "node": "2", "input": "text" },
+        "negativePrompt": { "node": "3", "input": "text" },
+        "seed": { "node": "7", "input": "seed" },
+        "steps": { "node": "7", "input": "steps" },
+        "cfg": { "node": "7", "input": "cfg" },
+        "denoise": { "node": "7", "input": "denoise" }
+      }
+    }
+  }
+}
