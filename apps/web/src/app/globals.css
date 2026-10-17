@@ -1,0 +1,5 @@
+@import "tailwindcss";
+html, body { min-height: 100%; }
+body { background: #101923; color: #edf5f7; font-family: system-ui, sans-serif; }
+button, input, select { color: inherit; }
+button { cursor: pointer; }
