@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .errors import AssetIntegrityError, AssetNotFoundError, CharacterStudioError, RecordNotFoundError
 from .service import CharacterStudioM1Service
-from .generation import GenerationConflictError, GenerationService, GenerationUnavailableError
+from .generation import GenerationConflictError, GenerationSafetyHoldError, GenerationService, GenerationUnavailableError
 from .comfyui import adapter_from_environment
 from .workspace import WorkspaceConflictError, WorkspaceService
 
@@ -170,6 +170,8 @@ def handler_for(core: CharacterStudioM1Service, token: str, adapter=None) -> typ
             except WorkspaceConflictError as error:
                 self._reply(409, {"error": {"code": "WORKSPACE_CONFLICT",
                     "currentRevision": error.current_revision}})
+            except GenerationSafetyHoldError as error:
+                self._reply(409, {"error": {"code": "GENERATION_SAFETY_HOLD", "message": str(error)}})
             except GenerationConflictError as error:
                 self._reply(409, {"error": {"code": "GENERATION_CONFLICT", "message": str(error)}})
             except GenerationUnavailableError as error:

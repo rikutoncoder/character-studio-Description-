@@ -12,6 +12,17 @@
 
 ## エンティティ
 
+### generation_safety_holds（2026-11-07追加）
+
+- `attempt_id`: 主キー、JobAttempt参照
+- `reason`: 保留開始理由
+- `created_at`: 開始時刻
+- `resolved_at`: 解除時刻、未解除ならNULL
+- `resolution_kind`: `COMFY_HISTORY | ADMIN_RESTART`、未解除ならNULL
+- `resolution_evidence_json`: prompt ID、または管理者が確認した旧／新backend PIDと操作理由。未解除ならNULL
+
+保留・解除は追記相当の監査情報として扱う。解除後の行変更・削除をSQLite triggerで拒否する。schema v3からv4への追加は既存Asset、Mask、ImageVersion、Workspace、Jobを上書きせず、未解決の失敗Attemptだけを保留へ移行する。
+
 ### projects
 
 - `id`: UUID、主キー

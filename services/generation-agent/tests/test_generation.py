@@ -3,12 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 import base64
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 
 from character_studio.generation import GenerationConflictError, GenerationService
+from character_studio.safety_admin import resolve_after_restart
 from character_studio.imaging import CompositeMetrics
 from character_studio.service import CharacterStudioM1Service
 from character_studio.workspace import WorkspaceService
@@ -226,3 +228,150 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.service.get_job(job.id).state, "FAILED")
         with self.assertRaises(GenerationConflictError):
             self.service.retry(job.id)
+
+    def test_unresolved_prompt_blocks_new_job_and_already_queued_job(self) -> None:
+        first = self.service.create_job(self.request(), "safety-first")
+        second = self.service.create_job(self.request(), "safety-second")
+        with self.core.database.connection:
+            self.core.database.connection.execute(
+                "UPDATE generation_jobs SET created_at='2020-01-01 00:00:00' WHERE id=?", (first.id,),
+            )
+        def fail_after_receipt(**kwargs):
+            kwargs["on_prompt_id"]("still-running")
+            raise ConnectionError("link lost")
+        self.adapter.render = fail_after_receipt
+        self.assertTrue(self.service.run_once())
+        self.assertEqual(self.service.get_job(first.id).state, "FAILED")
+        self.assertEqual(self.service.get_job(second.id).state, "QUEUED")
+        self.assertFalse(self.service.run_once())
+        with self.assertRaises(GenerationConflictError):
+            self.service.create_job(self.request(), "safety-third")
+        self.assertEqual(self.service.create_job(self.request(), "safety-first").id, first.id)
+        self.assertEqual(self.core.database.connection.execute(
+            "SELECT COUNT(*) FROM generation_safety_holds WHERE resolved_at IS NULL"
+        ).fetchone()[0], 1)
+        self.assertEqual(self.core.database.connection.execute(
+            "SELECT COUNT(*) FROM candidates"
+        ).fetchone()[0], 0)
+
+    def test_history_completion_releases_global_hold_and_queue(self) -> None:
+        first = self.service.create_job(self.request(), "history-first")
+        second = self.service.create_job(self.request(), "history-second")
+        with self.core.database.connection:
+            self.core.database.connection.execute(
+                "UPDATE generation_jobs SET created_at='2020-01-01 00:00:00' WHERE id=?", (first.id,),
+            )
+        def fail_after_receipt(**kwargs):
+            kwargs["on_prompt_id"]("eventually-finished")
+            raise ConnectionError("link lost")
+        self.adapter.render = fail_after_receipt
+        self.service.run_once()
+        self.adapter.prompt_finished = lambda _prompt_id: True
+        self.adapter.render = FakeAdapter().render
+        self.assertTrue(self.service.run_once())
+        self.assertEqual(self.service.get_job(second.id).state, "SUCCEEDED")
+        self.assertEqual(self.service.get_job(first.id).state, "FAILED")
+        row = self.core.database.connection.execute(
+            "SELECT resolution_kind FROM generation_safety_holds"
+        ).fetchone()
+        self.assertEqual(row["resolution_kind"], "COMFY_HISTORY")
+
+    def test_uncertain_submission_holds_new_jobs_until_local_admin_resolution(self) -> None:
+        from character_studio.generation import GenerationUnavailableError
+        job = self.service.create_job(self.request(), "uncertain-first")
+        self.adapter.render = lambda **_kwargs: (_ for _ in ()).throw(
+            GenerationUnavailableError("SUBMISSION_UNCERTAIN")
+        )
+        self.service.run_once()
+        with self.assertRaises(GenerationConflictError):
+            self.service.create_job(self.request(), "uncertain-second")
+        attempt = self.core.database.connection.execute(
+            "SELECT id FROM job_attempts WHERE job_id=?", (job.id,),
+        ).fetchone()["id"]
+        self.adapter.base_url = "http://127.0.0.1:8188"
+        self.adapter._json = lambda path: {"queue_running": [], "queue_pending": []}
+        def checked_output(args, **_kwargs):
+            return ("python ComfyUI/main.py --port 8188" if args[0] == "ps"
+                    else "python 42 TCP 127.0.0.1:8188 (LISTEN)")
+        with patch("character_studio.safety_admin.os.kill", side_effect=ProcessLookupError), \
+             patch("character_studio.safety_admin.subprocess.check_output", side_effect=checked_output):
+            with self.assertRaises(ValueError):
+                resolve_after_restart(self.service, attempt_id=attempt, prompt_id=None,
+                    old_pid=42, new_pid=42, note="Verified old backend has stopped and queue is empty")
+            resolved = resolve_after_restart(self.service, attempt_id=attempt, prompt_id=None,
+                old_pid=41, new_pid=42, note="Verified old backend has stopped and queue is empty")
+        self.assertEqual(resolved["resolution"], "ADMIN_RESTART")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.core.database.connection.execute(
+                "UPDATE generation_safety_holds SET resolution_kind='OTHER' WHERE attempt_id=?",
+                (attempt,),
+            )
+        self.core.database.connection.rollback()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.core.database.connection.execute(
+                "DELETE FROM generation_safety_holds WHERE attempt_id=?", (attempt,),
+            )
+        self.core.database.connection.rollback()
+        self.assertEqual(self.service.retry(job.id)["state"], "QUEUED")
+        self.assertEqual(self.service.create_job(self.request(), "uncertain-second").state, "QUEUED")
+
+    def test_worker_recovery_creates_durable_hold(self) -> None:
+        job = self.service.create_job(self.request(), "worker-hold")
+        with self.core.database.connection:
+            self.core.database.connection.execute(
+                "UPDATE generation_jobs SET state='RUNNING' WHERE id=?", (job.id,),
+            )
+        self.service.recover_interrupted()
+        with self.assertRaises(GenerationConflictError):
+            self.service.create_job(self.request(), "worker-hold-next")
+        self.assertEqual(self.service.safety_holds()[0]["reason"], "WORKER_LOST")
+
+    def test_schema_v3_upgrade_backfills_unresolved_attempt(self) -> None:
+        job = self.service.create_job(self.request(), "legacy-attempt")
+        def fail_after_receipt(**kwargs):
+            kwargs["on_prompt_id"]("lost-history")
+            raise ConnectionError("link lost")
+        self.adapter.render = fail_after_receipt
+        self.service.run_once()
+        self.core.database.connection.executescript(
+            "DROP TABLE generation_safety_holds; DELETE FROM schema_migrations WHERE version=4;"
+        )
+        self.core.database.close()
+        self.core = CharacterStudioM1Service.open(Path(self.temp.name))
+        self.service = GenerationService(self.core, self.adapter)
+        self.assertEqual(self.service.get_job(job.id).state, "FAILED")
+        self.assertEqual(len(self.service.safety_holds()), 1)
+        with self.assertRaises(GenerationConflictError):
+            self.service.create_job(self.request(), "legacy-new-job")
+
+    def test_admin_resolution_refuses_live_old_pid_or_busy_queue(self) -> None:
+        job = self.service.create_job(self.request(), "admin-negative")
+        self.adapter.render = lambda **_kwargs: (_ for _ in ()).throw(
+            ConnectionError("No prompt receipt")
+        )
+        # A worker crash before any receipt also requires an administrator.
+        with self.core.database.connection:
+            self.core.database.connection.execute(
+                "UPDATE generation_jobs SET state='RUNNING' WHERE id=?", (job.id,),
+            )
+        self.service.recover_interrupted()
+        attempt = self.core.database.connection.execute(
+            "SELECT id FROM job_attempts WHERE job_id=?", (job.id,),
+        ).fetchone()["id"]
+        self.adapter.base_url = "http://127.0.0.1:8188"
+        self.adapter._json = lambda _path: {"queue_running": [], "queue_pending": []}
+        note = "Observed old process and new listener on this local Mac"
+        with patch("character_studio.safety_admin.os.kill", return_value=None):
+            with self.assertRaises(GenerationConflictError):
+                resolve_after_restart(self.service, attempt_id=attempt, prompt_id=None,
+                    old_pid=41, new_pid=42, note=note)
+        def checked_output(args, **_kwargs):
+            return ("python ComfyUI/main.py --port 8188" if args[0] == "ps"
+                    else "python 42 TCP 127.0.0.1:8188 (LISTEN)")
+        self.adapter._json = lambda _path: {"queue_running": [[0, "other-prompt"]], "queue_pending": []}
+        with patch("character_studio.safety_admin.os.kill", side_effect=ProcessLookupError), \
+             patch("character_studio.safety_admin.subprocess.check_output", side_effect=checked_output):
+            with self.assertRaises(GenerationConflictError):
+                resolve_after_restart(self.service, attempt_id=attempt, prompt_id=None,
+                    old_pid=41, new_pid=42, note=note)
+        self.assertIsNone(self.service.safety_holds()[0]["resolved_at"])

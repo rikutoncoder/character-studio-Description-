@@ -6,7 +6,7 @@ import DifferenceView from './DifferenceView';
 
 type Job = {
   id: string; state: string; attempt: { number: number; seed: number; error_code: string | null } | null;
-  candidateId: string | null; queuePosition: number;
+  candidateId: string | null; queuePosition: number; safetyHold?: boolean;
 };
 type Candidate = {
   id: string; state: string; sourceVersionId: string; sourceAssetId: string;
@@ -17,7 +17,12 @@ type Candidate = {
 async function m3<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, cache: 'no-store', headers: { 'Content-Type': 'application/json', ...init?.headers } });
   const value = await response.json();
-  if (!response.ok) throw new Error(value.error?.message ?? value.error?.code ?? `HTTP ${response.status}`);
+  if (!response.ok) {
+    if (value.error?.code === 'GENERATION_SAFETY_HOLD') {
+      throw new Error('前の生成が終了したか確認できないため、安全のため新しい生成を止めています。Macの管理者による確認が必要です。');
+    }
+    throw new Error(value.error?.message ?? value.error?.code ?? `HTTP ${response.status}`);
+  }
   return value as T;
 }
 
@@ -149,6 +154,7 @@ export default function GenerationWorkspace({ workspaceId }: { workspaceId: stri
     {job && <section className="mt-6 rounded border border-slate-700 p-4" aria-live="polite">
       <h2 className="font-semibold">生成の状態: {job.state}</h2>
       <p className="text-sm text-slate-300">試行 {job.attempt?.number ?? 0} · 待ち順 {job.queuePosition || '実行中または完了'} · Job {job.id.slice(0, 8)}</p>
+      {job.safetyHold && job.state === 'QUEUED' && <p className="mt-2 text-amber-300">前の生成の終了を確認できないため、安全確認までこのJobは待機します。</p>}
       {job.attempt?.error_code && <p className="text-amber-300">失敗理由: {job.attempt.error_code}</p>}
       <div className="mt-3 flex gap-2">
         {!['SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'WORKER_LOST'].includes(job.state) && <button disabled={busy} onClick={() => action('cancel')} className="rounded bg-slate-700 px-3 py-2">取り消す</button>}

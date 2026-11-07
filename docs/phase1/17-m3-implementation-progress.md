@@ -87,3 +87,37 @@ retryは前回のComfyUI prompt IDが残る場合、`/queue`と`/history`で終�
 3. 衣装追加は精密なシルエットガイドがないと大きな形崩れが生じる。候補を自動採用せず、見た目の判断と必要な手動修正を制作フローに残す。
 4. Python HTTP結合試験で大きなWorkspace応答の途中に接続リセットが計2回発生。未読POST本文という原因候補を修正し、同一ソケットで次のリクエストが通る試験と全37件の10回連続実行は合格した。断続的失敗の根因と断定できないため、実利用・CIで再発を監視する。
 5. M2の両ガイド同時消去のiPhone保存画素・Undo／Redoは2026-10-18に合格。Next.js→Python→SQLiteの隔離環境で100回の保存・再読込も合格した。実機大ストローク性能、ブラウザの現行／直前版別試験、複数クライアントや長期反復保存は公開前ゲートとして継続。詳細は[16-m2-final-acceptance.md](16-m2-final-acceptance.md)。
+
+## 2026-10-18 最終受入の追加検証
+
+詳細な合否、測定環境、再現手順は[18-m3-acceptance-verification.md](18-m3-acceptance-verification.md)。通常DBを使わない5分間のHTTP並行試験では、Workspace保存263回、再読込337回、Job状態取得578回、SSE接続20回、大きなGET応答の途中切断42回を実行し、HTTPエラーとDB不整合は0件。未完了PUTの途中切断も別の隔離試験で行い、revisionと確定版は不変だった。ただしPC／スマホ実機の同時操作そのものではない。
+
+実ComfyUIでの隔離された色変更生成1回は214.5秒で`SUCCEEDED`。候補1件、確定版の追加なし、マスク外変更0画素、alpha変更0画素。21サンプルのMac全体のswap使用量は開始時4,138.25MiB、観測最大10,556.94MiB。ComfyUI API報告の空きRAMは観測最小203.0MiBであり、Mac全体の空きメモリやピーク使用量ではない。画面への読み取りGETは全21回HTTP 200、観測最大286.9ms。実際の描画操作の遅延は未測定。
+
+Python 37件、Vitest 6件、Playwright 42件、production buildは再実行して合格。その後ユーザー承認を得て、実生成中にComfyUI Desktopを正常終了した。隔離Jobは`FAILED`、候補0件、確定版不変。通常SQLiteのオンラインバックアップと停止後の照合は正常。Desktopアプリは再度起動したが、Macがロック中で画面操作できず、ComfyUI backendはまだlocalhost:8188へ復旧していない。再起動後のqueue/history、再実行可否は**未検証**。従ってM3最終受入は引き続き保留し、M4本格実装には進まない。
+
+## 2026-10-22 Desktop復旧の追試
+
+ユーザーがMacのロックを解除した後、ComfyUI Desktopの既存Standaloneインスタンスを選んでbackendを起動した。localhost:8188の`system_stats`はComfyUI 0.40.0、queueは空。旧promptのhistoryは空となり、元Jobの`retry`は安全側に409相当の競合として拒否され、状態・attempt数は不変だった。旧backend PID 11514が停止し、新backend PID 90793であることを確認した上で、**手動で別の新Jobを1件だけ**隔離Workspaceに投入した。746.1秒で`SUCCEEDED`、旧Jobは`FAILED`・候補0件、新Jobは候補1件、両Jobともattemptは各1件、確定版不変、マスク外・alpha変更0画素、DB整合性正常。ComfyUI履歴は新promptのみ`success`、queueは空。通常DBはバックアップ時と件数・両project headが一致した。詳細は[18-m3-acceptance-verification.md](18-m3-acceptance-verification.md)。
+
+ただし同一Jobのretryは履歴消失後に解除できない。さらに別のidempotency keyによる新Job作成はこのガードを通らないため、**旧backendの停止を確認できない通常の接続断時に新Jobを作ると二重生成のおそれがある**。今回の手動試験は停止済み旧PIDを確認していたため安全だったが、製品の一般操作に対する保証にはならない。安全な再実行の管理者手順と新Job側のガードは未決定であり、M3最終受入・M4本格実装を保留する。
+
+## 2026-11-07 安全保留の修正（ローカル実装、未展開）
+
+ユーザーが管理者確認後のみ解除する方針を承認。SQLite schema v4にAttempt単位の`generation_safety_holds`を追加し、prompt受付後の失敗、受付成否不明、Agent再起動による`WORKER_LOST`を保留する。保留中は新Job作成、queued Jobの実行、retryを停止。ComfyUI履歴で終了を確認できたときだけ自動解除し、履歴消失時はMac上の専用CLIで旧backend停止・新backend待受・空queueを確認して監査記録付きで解除する。HTTP解除APIは作成していない。旧schema v3からの移行は未解決Attemptを保留へ登録する。
+
+隔離DBでPython 43件、Vitest 6件、Playwright 45件、production buildが合格。HTTPからの新Job作成が安全保留専用コードの409になる回帰試験、日本語の警告表示のPC・スマホ相当E2Eも通過。**通常DBはschema v3のまま、2026-11-07確認時点で通常Agentは停止中であり、新コードは通常環境に展開していない。** このため本修正の実機運用試験とM3最終受入は未完了。詳細は[18-m3-acceptance-verification.md](18-m3-acceptance-verification.md)。
+
+## 2026-11-07 通常環境への展開
+
+上記は展開前の記録。ユーザー承認後、通常DBに実行中・待機中Jobがないことと`integrity_check=ok`を確認し、SQLiteオンラインバックアップを`/Users/kainorikuto/Library/Application Support/CharacterStudio/Data/backups/m3-before-v4-20261107-122715.sqlite3`へ作成した。バックアップSHA-256は`f17fc09c6cd62e08b4aceaabdcace648f2d24ec21117f22bf39f77a67c3a9a6d`、整合性は正常。バックアップから復元する場合は、まずLAN入口・Agentを停止し、通常DBをさらに退避してからSQLite backup APIで戻す。稼働中のDBファイルを直接上書きしない。
+
+通常DBをschema v3→v4へ移行した。Project 2、Asset 53、ImageVersion 1、Mask 1、CompositeResult 1、Workspace 4、EditOperation 1、Job 1、Attempt 1、Event 8、Candidate 1の全行が移行前バックアップと一致し、`integrity_check=ok`。安全保留は0件。既存の確定画像、版、候補、Workspaceには変更がなかった。
+
+既存のproduction buildを使用して通常LAN入口、Next.js、Python Agentを起動した。`pnpm start:lan`は環境側のpnpm依存関係チェック（ignored builds）で開始前に失敗したため、既存Node実行ファイルで同じ`lan/run.mjs`を直接起動した。2026-11-07 12:28 JSTの起動チェックは、Web `/` HTTP 200、Web `/api/m2/projects` HTTP 200、HTTPS入口の未認証リクエスト401、Python内部APIの無認証リクエスト403。Python Agentは127.0.0.1:8765、Next.jsは127.0.0.1:3000、HTTPS入口は既存のLAN設定。追加サービス契約・モデルダウンロードはない。
+
+最初の起動では生成用環境変数がなく、生成workerが無効だったため正常終了した。既存のAnimagine XL 3.1 checkpoint、workflow manifest、`http://127.0.0.1:8188`を指定して12:31 JSTに再起動した。起動時のモデル／workflow SHA-256検証と内部API認証チェックを通過。再起動後もWeb 200、HTTPS未認証401、ComfyUI localhost `system_stats` 200、通常DB schema v4・`integrity_check=ok`、既存件数不変、安全保留0件を確認した。起動中の正常サービスは後者である。
+
+展開後のM1～M3 Python unittest 43件も隔離DBで再実行して全件合格（9.106秒）。通常DBには試験用データを書き込んでいない。
+
+展開後に実際の安全保留を通常DBへ作成する試験や実iPhoneでの再試験は行っていない。安全保留の409、管理解除、二重生成防止は隔離DBの自動・手動試験による合格に留まる。M3最終受入は引き続き保留し、M4本格実装は開始しない。

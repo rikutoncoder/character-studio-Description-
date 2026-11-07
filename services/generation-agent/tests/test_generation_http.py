@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 import urllib.request
+import urllib.error
 from http.server import HTTPServer
 from pathlib import Path
 
@@ -106,6 +107,27 @@ class GenerationHttpTests(unittest.TestCase):
                 _, adopted = call(f"/candidates/{candidate['id']}/adopt",
                                   {"expectedHeadVersionId": imported["versionId"]}, "adopt-http-key")
                 self.assertEqual(adopted["state"], "ADOPTED")
+                _, failed_job = call("/generation-jobs", {
+                    "workspaceId": workspace["id"], "expectedRevision": workspace["revision"],
+                    "operationType": "COLOR_CHANGE", "prompt": "blue", "negativePrompt": "",
+                    "preset": {"denoise": 0.3, "steps": 20, "cfg": 7, "seed": 2},
+                }, "http-failure-key")
+                class DisconnectAdapter(FakeAdapter):
+                    def render(self, **kwargs):
+                        kwargs["on_prompt_id"]("still-running-in-comfy")
+                        raise ConnectionError("ComfyUI link lost")
+                    def prompt_finished(self, _prompt_id):
+                        return False
+                self.assertTrue(GenerationService(worker, DisconnectAdapter()).run_once())
+                self.assertEqual(call(f"/generation-jobs/{failed_job['id']}")[1]["state"], "FAILED")
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    call("/generation-jobs", {
+                        "workspaceId": workspace["id"], "expectedRevision": workspace["revision"],
+                        "operationType": "COLOR_CHANGE", "prompt": "blue", "negativePrompt": "",
+                        "preset": {"denoise": 0.3, "steps": 20, "cfg": 7, "seed": 3},
+                    }, "http-new-job-blocked")
+                self.assertEqual(caught.exception.code, 409)
+                self.assertEqual(json.loads(caught.exception.read())["error"]["code"], "GENERATION_SAFETY_HOLD")
             finally:
                 if worker is not None:
                     worker.database.close()

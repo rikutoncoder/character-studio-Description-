@@ -157,5 +157,16 @@ candidate.sourceVersionId
 
 - `LEASED`または`RUNNING`のAttemptを無条件に成功扱いしない。
 - ComfyUI履歴と出力ファイルを照合できる場合だけ回収処理を行う。
-- 回収不能なら`WORKER_LOST`とし、再実行可能にする。
+- 回収不能なら`WORKER_LOST`とし、旧ComfyUI実行の終了を確認するまで再実行・新Job実行を保留する。
 - 確定版と採用済みAssetには影響させない。
+
+## 2026-11-07 安全保留の追加（承認済み）
+
+実Desktop停止試験で、同一Jobのretryだけを止めても別のIdempotency-Keyによる新Jobが旧promptの実行中に生成できる穴が見つかった。これを塞ぐため、終了を確認できないAttemptをDBの`generation_safety_holds`に記録する。保留が1件でも開いている間は全プロジェクトの新Job作成とqueued Jobのlease、retryを止める。既存キーの冪等再送・Job閲覧・キャンセル・Workspace編集は許可する。
+
+- prompt IDがある失敗Attemptは、ComfyUIのqueueに存在せず、historyが`success`または`error`を示したときだけ自動解除する。接続不能・history欠落は解除証拠にならない。
+- prompt受付成否が不明な`SUBMISSION_UNCERTAIN`とAgent再起動での`WORKER_LOST`は、履歴確認できなければ保留する。旧DBの該当Attemptもschema v4移行時に保留へ登録する。
+- historyが再起動で消えた場合、Mac上の管理者が旧backend PIDの消滅、新backend PIDのlocalhost待受、空queue、該当Attempt／promptを確認した後だけ、専用CLIで保留を解除できる。CLIは操作理由と証拠を不変の監査記録へ残す。ブラウザ・LAN・Python内部HTTPには解除APIを設けない。
+- 旧backend PIDを確実に特定できない、またはqueueが空でないときは解除しない。自動再送もしない。
+
+この追加は安全性を優先する。管理者確認まで他の正常Jobも待つ可能性があるため、UIには安全保留の409を説明し、運用手順を整備する。実装・試験結果は[18-m3-acceptance-verification.md](18-m3-acceptance-verification.md)を参照。

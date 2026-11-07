@@ -19,7 +19,7 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Database:
@@ -209,6 +209,24 @@ class Database:
                     finished_at TEXT,
                     UNIQUE(job_id, number)
                 );
+                CREATE TABLE IF NOT EXISTS generation_safety_holds (
+                    attempt_id TEXT PRIMARY KEY REFERENCES job_attempts(id),
+                    reason TEXT NOT NULL,
+                    resolved_at TEXT,
+                    resolution_kind TEXT,
+                    resolution_evidence_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CHECK ((resolved_at IS NULL AND resolution_kind IS NULL AND resolution_evidence_json IS NULL)
+                        OR (resolved_at IS NOT NULL AND resolution_kind IS NOT NULL AND resolution_evidence_json IS NOT NULL))
+                );
+                CREATE TRIGGER IF NOT EXISTS generation_safety_holds_no_delete
+                BEFORE DELETE ON generation_safety_holds
+                BEGIN SELECT RAISE(ABORT, 'safety hold audit cannot be deleted'); END;
+                CREATE TRIGGER IF NOT EXISTS generation_safety_holds_resolution_immutable
+                BEFORE UPDATE ON generation_safety_holds
+                WHEN OLD.resolved_at IS NOT NULL OR NEW.attempt_id != OLD.attempt_id
+                    OR NEW.reason != OLD.reason OR NEW.created_at != OLD.created_at
+                BEGIN SELECT RAISE(ABORT, 'safety hold audit is immutable'); END;
                 CREATE TABLE IF NOT EXISTS job_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id TEXT NOT NULL REFERENCES generation_jobs(id),
@@ -239,6 +257,19 @@ class Database:
             self.connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)"
             )
+            self.connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (3)"
+            )
+            if self.connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=4"
+            ).fetchone() is None:
+                self.connection.execute(
+                    """INSERT OR IGNORE INTO generation_safety_holds(attempt_id,reason)
+                       SELECT a.id,'LEGACY_UNCERTAIN' FROM job_attempts a
+                       WHERE a.state IN ('FAILED','WORKER_LOST','TIMED_OUT')
+                         AND (a.comfy_prompt_id IS NOT NULL OR a.error_code='SUBMISSION_UNCERTAIN'
+                              OR a.state='WORKER_LOST')"""
+                )
             self.connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                 (SCHEMA_VERSION,),

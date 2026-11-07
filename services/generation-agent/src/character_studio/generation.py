@@ -28,6 +28,10 @@ class GenerationConflictError(Exception):
     pass
 
 
+class GenerationSafetyHoldError(GenerationConflictError):
+    pass
+
+
 class GenerationUnavailableError(Exception):
     pass
 
@@ -72,6 +76,49 @@ class GenerationService:
         self.storage = core.asset_store
         self.workspaces = WorkspaceService(self.db, self.storage)
         self.adapter = adapter
+
+    def _refresh_safety_holds(self) -> None:
+        """Only a confirmed ComfyUI history result may release a hold automatically."""
+        if self.adapter is None:
+            return
+        rows = self.db.connection.execute(
+            """SELECT h.attempt_id,a.job_id,a.comfy_prompt_id FROM generation_safety_holds h
+               JOIN job_attempts a ON a.id=h.attempt_id WHERE h.resolved_at IS NULL"""
+        ).fetchall()
+        for row in rows:
+            prompt_id = row["comfy_prompt_id"]
+            if not prompt_id:
+                continue
+            try:
+                finished = self.adapter.prompt_finished(prompt_id)
+            except Exception:
+                continue  # An unreachable ComfyUI is never proof that a prompt stopped.
+            if finished:
+                with self.db.transaction() as connection:
+                    changed = connection.execute(
+                        """UPDATE generation_safety_holds SET resolved_at=CURRENT_TIMESTAMP,
+                           resolution_kind='COMFY_HISTORY',resolution_evidence_json=?
+                           WHERE attempt_id=? AND resolved_at IS NULL""",
+                        (json.dumps({"promptId": prompt_id}), row["attempt_id"]),
+                    ).rowcount
+                    if changed:
+                        _event(connection, row["job_id"], "generation.safety_hold.resolved",
+                               {"attemptId": row["attempt_id"], "kind": "COMFY_HISTORY"})
+
+    def _open_safety_hold(self, connection: sqlite3.Connection) -> sqlite3.Row | None:
+        return connection.execute(
+            "SELECT attempt_id,reason FROM generation_safety_holds WHERE resolved_at IS NULL LIMIT 1"
+        ).fetchone()
+
+    def safety_holds(self) -> list[dict[str, object]]:
+        """Read-only operator inventory; no browser endpoint exposes resolution."""
+        rows = self.db.connection.execute(
+            """SELECT h.attempt_id,h.reason,h.resolved_at,h.resolution_kind,
+                      a.job_id,a.comfy_prompt_id
+               FROM generation_safety_holds h JOIN job_attempts a ON a.id=h.attempt_id
+               ORDER BY h.created_at,h.attempt_id"""
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def create_job(self, request: dict[str, object], idempotency_key: str) -> JobResult:
         if self.adapter is None:
@@ -118,6 +165,9 @@ class GenerationService:
             if old["request_hash"] != request_hash:
                 raise GenerationConflictError("Idempotency-Key was used for different input")
             return self.get_job(old["id"])
+        self._refresh_safety_holds()
+        if self._open_safety_hold(self.db.connection) is not None:
+            raise GenerationSafetyHoldError("Generation is on safety hold until the previous prompt is verified")
         if workspace.revision != expected_revision:
             raise WorkspaceConflictError(workspace.revision)
         source_version = self.db.get_version(workspace.base_version_id)
@@ -137,6 +187,8 @@ class GenerationService:
             self.storage.read_bytes(asset.storage_uri, asset.sha256)
         operation_id, job_id, attempt_id = (str(uuid.uuid4()) for _ in range(3))
         with self.db.transaction() as connection:
+            if self._open_safety_hold(connection) is not None:
+                raise GenerationSafetyHoldError("Generation is on safety hold until the previous prompt is verified")
             current = connection.execute("SELECT revision FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
             if current is None or current["revision"] != expected_revision:
                 raise WorkspaceConflictError(current["revision"] if current else -1)
@@ -189,7 +241,8 @@ class GenerationService:
             (job_id,),
         ).fetchone()[0] if job.state == "QUEUED" else 0
         return {"id": job.id, "state": job.state, "attempt": dict(attempt) if attempt else None,
-                "candidateId": job.candidate_id, "queuePosition": queue}
+                "candidateId": job.candidate_id, "queuePosition": queue,
+                "safetyHold": self._open_safety_hold(self.db.connection) is not None}
 
     def events(self, job_id: str, after: int = 0) -> list[dict[str, object]]:
         self.get_job(job_id)
@@ -229,8 +282,17 @@ class GenerationService:
         ).fetchone()
         if new_seed is not None and (type(new_seed) is not int or not 0 <= new_seed < 2**64):
             raise ValueError("newSeed is invalid")
+        self._refresh_safety_holds()
+        hold = self.db.connection.execute(
+            "SELECT resolved_at FROM generation_safety_holds WHERE attempt_id=(SELECT id FROM job_attempts WHERE job_id=? ORDER BY number DESC LIMIT 1)",
+            (job_id,),
+        ).fetchone()
+        if self._open_safety_hold(self.db.connection) is not None:
+            raise GenerationSafetyHoldError("Generation is on safety hold until the previous prompt is verified")
         prompt_id = old["comfy_prompt_id"]
-        if prompt_id:
+        if hold is not None and hold["resolved_at"] is not None:
+            pass  # Comfy history or a local administrator already proved the old process stopped.
+        elif prompt_id:
             if self.adapter is None:
                 raise GenerationUnavailableError("ComfyUI is not configured; cannot verify the previous prompt")
             try:
@@ -242,6 +304,8 @@ class GenerationService:
         elif job.state == "WORKER_LOST" or old["error_code"] == "SUBMISSION_UNCERTAIN":
             raise GenerationConflictError("Previous ComfyUI submission is uncertain; retry is blocked")
         with self.db.transaction() as connection:
+            if self._open_safety_hold(connection) is not None:
+                raise GenerationSafetyHoldError("Generation is on safety hold until the previous prompt is verified")
             current = connection.execute(
                 "SELECT state FROM generation_jobs WHERE id=?", (job_id,),
             ).fetchone()
@@ -278,6 +342,13 @@ class GenerationService:
                     "UPDATE job_attempts SET state='WORKER_LOST',error_code='WORKER_LOST',finished_at=CURRENT_TIMESTAMP WHERE job_id=? AND state NOT IN ('FAILED','SUCCEEDED')",
                     (row["id"],),
                 )
+                attempt = connection.execute(
+                    "SELECT id FROM job_attempts WHERE job_id=? ORDER BY number DESC LIMIT 1", (row["id"],),
+                ).fetchone()
+                connection.execute(
+                    "INSERT OR IGNORE INTO generation_safety_holds(attempt_id,reason) VALUES (?,'WORKER_LOST')",
+                    (attempt["id"],),
+                )
                 _event(connection, row["id"], "job.status.changed", {"state": "WORKER_LOST"})
         return len(rows)
 
@@ -296,7 +367,10 @@ class GenerationService:
     def run_once(self) -> bool:
         if self.adapter is None:
             return False
+        self._refresh_safety_holds()
         with self.db.transaction() as connection:
+            if self._open_safety_hold(connection) is not None:
+                return False
             active = connection.execute(
                 "SELECT 1 FROM generation_jobs WHERE state IN ('LEASED','RUNNING','RAW_OUTPUT_READY','COMPOSITING','VALIDATING') LIMIT 1",
             ).fetchone()
@@ -333,6 +407,15 @@ class GenerationService:
                     "UPDATE job_attempts SET state='FAILED',error_code=?,finished_at=CURRENT_TIMESTAMP WHERE id=(SELECT id FROM job_attempts WHERE job_id=? ORDER BY number DESC LIMIT 1)",
                     (code, job_id),
                 )
+                attempt = connection.execute(
+                    "SELECT id,comfy_prompt_id FROM job_attempts WHERE job_id=? ORDER BY number DESC LIMIT 1",
+                    (job_id,),
+                ).fetchone()
+                if attempt["comfy_prompt_id"] or code == "SUBMISSION_UNCERTAIN":
+                    connection.execute(
+                        "INSERT OR IGNORE INTO generation_safety_holds(attempt_id,reason) VALUES (?,?)",
+                        (attempt["id"], code),
+                    )
                 _event(connection, job_id, "job.attempt.failed",
                        {"errorCode": code})
         return True

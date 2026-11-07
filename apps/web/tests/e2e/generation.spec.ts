@@ -46,6 +46,23 @@ test('generation setup, strict-only adoption, and conflict message', async ({ pa
   await expect(page.getByText('Project head changed')).toBeVisible();
 });
 
+test('safety hold explains blocked new generation in Japanese', async ({ page }) => {
+  await page.route('**/api/m2/workspaces/**', route => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ id: workspaceId, projectId: 'project', baseVersionId: 'version',
+      baseAssetId: 'asset', revision: 2, schemaVersion: 1, width: 832, height: 1216,
+      mask: '', colorGuide: '', silhouetteGuide: '', featherInwardPx: 3, layers: {} }),
+  }));
+  await page.route('**/api/generation-jobs', route => route.fulfill({
+    status: 409, contentType: 'application/json',
+    body: JSON.stringify({ error: { code: 'GENERATION_SAFETY_HOLD', message: 'Generation is on safety hold' } }),
+  }));
+  await page.goto(`/generation/${workspaceId}`);
+  await page.getByRole('textbox', { name: '作りたいもの' }).fill('blue jacket');
+  await page.getByRole('button', { name: '生成を開始' }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Macの管理者による確認が必要です' })).toBeVisible();
+});
+
 test('a status refresh does not repeatedly recreate the event stream', async ({ page }) => {
   let subscriptions = 0;
   await page.route('**/api/m2/workspaces/**', route => route.fulfill({
