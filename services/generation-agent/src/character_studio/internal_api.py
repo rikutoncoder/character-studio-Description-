@@ -19,6 +19,7 @@ from .service import CharacterStudioM1Service
 from .generation import GenerationConflictError, GenerationSafetyHoldError, GenerationService, GenerationUnavailableError
 from .comfyui import adapter_from_environment
 from .workspace import WorkspaceConflictError, WorkspaceService
+from .versions import VersionConflictError, VersionService
 
 MAX_BODY = 18 * 1024 * 1024
 
@@ -26,6 +27,7 @@ MAX_BODY = 18 * 1024 * 1024
 def handler_for(core: CharacterStudioM1Service, token: str, adapter=None) -> type[BaseHTTPRequestHandler]:
     workspaces = WorkspaceService(core.database, core.asset_store)
     generation = GenerationService(core, adapter)
+    versions = VersionService(core)
 
     class Handler(BaseHTTPRequestHandler):
         def _reply(self, status: int, value: object) -> None:
@@ -116,6 +118,9 @@ def handler_for(core: CharacterStudioM1Service, token: str, adapter=None) -> typ
                         return
                 if len(parts) >= 3 and parts[:2] == ["internal", "projects"]:
                     project_id = parts[2]
+                    if len(parts) == 4 and parts[3] == "versions" and self.command == "GET":
+                        self._reply(200, versions.list_for_project(project_id))
+                        return
                     if len(parts) == 4 and parts[3] == "imports" and self.command == "POST":
                         body = self._body()
                         data = base64.b64decode(str(body.get("contentBase64", "")), validate=True)
@@ -156,6 +161,23 @@ def handler_for(core: CharacterStudioM1Service, token: str, adapter=None) -> typ
                         source = workspaces.get(workspace_id)
                         self._reply(201, workspaces.create(source.project_id, source).to_json())
                         return
+                if len(parts) >= 3 and parts[:2] == ["internal", "versions"]:
+                    version_id = parts[2]
+                    if len(parts) == 3 and self.command == "GET":
+                        self._reply(200, versions.get(version_id))
+                        return
+                    if len(parts) == 4 and parts[3] == "restore" and self.command == "POST":
+                        body = self._body()
+                        project_id = body.get("projectId")
+                        expected = body.get("expectedHeadVersionId")
+                        if not isinstance(project_id, str) or not isinstance(expected, str):
+                            raise ValueError("projectId and expectedHeadVersionId are required")
+                        self._reply(201, versions.restore(
+                            version_id=version_id, project_id=project_id,
+                            expected_head_version_id=expected,
+                            idempotency_key=self.headers.get("Idempotency-Key", ""),
+                        ))
+                        return
                 if len(parts) == 4 and parts[:2] == ["internal", "assets"] and parts[3] == "content" and self.command == "GET":
                     asset = core.database.get_asset(parts[2])
                     data = core.asset_store.read_bytes(asset.storage_uri, asset.sha256)
@@ -174,6 +196,9 @@ def handler_for(core: CharacterStudioM1Service, token: str, adapter=None) -> typ
                 self._reply(409, {"error": {"code": "GENERATION_SAFETY_HOLD", "message": str(error)}})
             except GenerationConflictError as error:
                 self._reply(409, {"error": {"code": "GENERATION_CONFLICT", "message": str(error)}})
+            except VersionConflictError as error:
+                self._reply(409, {"error": {"code": "VERSION_CONFLICT", "message": str(error),
+                    "currentHeadVersionId": error.current_head_version_id}})
             except GenerationUnavailableError as error:
                 self._reply(503, {"error": {"code": "GENERATION_UNAVAILABLE", "message": str(error)}})
             except RecordNotFoundError as error:

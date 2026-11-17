@@ -19,7 +19,7 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class Database:
@@ -74,6 +74,7 @@ class Database:
                     project_id TEXT NOT NULL REFERENCES projects(id),
                     parent_version_id TEXT REFERENCES image_versions(id),
                     canonical_asset_id TEXT NOT NULL REFERENCES assets(id),
+                    restored_from_version_id TEXT REFERENCES image_versions(id),
                     ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(project_id, ordinal)
@@ -227,6 +228,21 @@ class Database:
                 WHEN OLD.resolved_at IS NOT NULL OR NEW.attempt_id != OLD.attempt_id
                     OR NEW.reason != OLD.reason OR NEW.created_at != OLD.created_at
                 BEGIN SELECT RAISE(ABORT, 'safety hold audit is immutable'); END;
+                CREATE TABLE IF NOT EXISTS version_restore_requests (
+                    project_id TEXT NOT NULL REFERENCES projects(id),
+                    idempotency_key TEXT NOT NULL,
+                    source_version_id TEXT NOT NULL REFERENCES image_versions(id),
+                    expected_head_version_id TEXT NOT NULL REFERENCES image_versions(id),
+                    result_version_id TEXT NOT NULL UNIQUE REFERENCES image_versions(id),
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(project_id,idempotency_key)
+                );
+                CREATE TRIGGER IF NOT EXISTS version_restore_requests_immutable
+                BEFORE UPDATE ON version_restore_requests
+                BEGIN SELECT RAISE(ABORT, 'version restore request is immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS version_restore_requests_no_delete
+                BEFORE DELETE ON version_restore_requests
+                BEGIN SELECT RAISE(ABORT, 'version restore request cannot be deleted'); END;
                 CREATE TABLE IF NOT EXISTS job_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id TEXT NOT NULL REFERENCES generation_jobs(id),
@@ -270,9 +286,14 @@ class Database:
                          AND (a.comfy_prompt_id IS NOT NULL OR a.error_code='SUBMISSION_UNCERTAIN'
                               OR a.state='WORKER_LOST')"""
                 )
+            self.connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (4)")
+            columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(image_versions)")}
+            if "restored_from_version_id" not in columns:
+                self.connection.execute(
+                    "ALTER TABLE image_versions ADD COLUMN restored_from_version_id TEXT REFERENCES image_versions(id)"
+                )
             self.connection.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
-                (SCHEMA_VERSION,),
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", (SCHEMA_VERSION,)
             )
 
     @contextlib.contextmanager

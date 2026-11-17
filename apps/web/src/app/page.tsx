@@ -55,6 +55,7 @@ export default function Home() {
       <p className="mt-2 text-sm text-slate-300">832×1216の画像を読み込みます。元画像は変更されません。</p>
       <input className="mt-3 block w-full text-sm" aria-label={`${project.name}の画像を読み込む`} type="file" accept="image/png,image/jpeg,image/webp" disabled={busy} onChange={event => importImage(project.id, event.target.files?.[0])} />
       <button disabled={busy || !project.headVersionId} className="mt-4 rounded bg-cyan-700 px-4 py-2 disabled:opacity-40" onClick={() => createWorkspace(project.id)}>新しいWorkspace</button>
+      {project.headVersionId && <a className="ml-4 inline-block text-cyan-300 underline" href={`/versions/${project.id}`}>版履歴を見る</a>}
       <ul className="mt-4 space-y-2">{(items[project.id] ?? []).map(item => <li key={item.id}><a className="text-cyan-300 underline" href={`/workspace/${item.id}`}>Workspace {item.id.slice(0, 8)}（保存版 {item.revision}）</a></li>)}</ul>
     </section>)}</div>
   </main>;

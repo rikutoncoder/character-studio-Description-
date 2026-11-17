@@ -28,6 +28,8 @@
 11. [実装計画](./10-implementation-plan.md)
 12. [リスクと未決定事項](./11-risks-and-open-questions.md)
 13. [M1実装報告](./12-m1-implementation-report.md)
+14. [M3ローカルマイルストーン受入](./18-m3-acceptance-verification.md)
+15. [M4版履歴・復元の実装記録](./19-m4-version-history-progress.md)
 
 ## Phase 0から引き継ぐ必須条件
 
