@@ -38,11 +38,14 @@ class InternalApiTests(unittest.TestCase):
             server, port = ready.get(timeout=5)
             root = f"http://127.0.0.1:{port}/internal"
 
-            def request(path: str, method: str = "GET", body: dict | None = None, token: bool = True) -> tuple[int, dict]:
+            def request(path: str, method: str = "GET", body: dict | None = None,
+                        token: bool = True, key: str = "") -> tuple[int, dict]:
                 data = json.dumps(body).encode() if body is not None else None
                 headers = {"Content-Type": "application/json"}
                 if token:
                     headers["X-Internal-Token"] = "test-internal-secret"
+                if key:
+                    headers["Idempotency-Key"] = key
                 req = urllib.request.Request(root + path, data=data, headers=headers, method=method)
                 try:
                     with urllib.request.urlopen(req) as response:
@@ -68,6 +71,21 @@ class InternalApiTests(unittest.TestCase):
                 self.assertEqual(conflict["error"]["currentRevision"], 2)
                 self.assertEqual(request(f"/workspaces/{draft['id']}")[1]["revision"], 2)
                 self.assertEqual(imported["versionId"], draft["baseVersionId"])
+                _, history = request(f"/projects/{project['id']}/versions")
+                self.assertEqual(history["headVersionId"], imported["versionId"])
+                self.assertEqual(len(history["versions"]), 1)
+                restore_path = f"/versions/{imported['versionId']}/restore"
+                restore_body = {"projectId": project["id"],
+                    "expectedHeadVersionId": imported["versionId"]}
+                status, restored = request(restore_path, "POST", restore_body, key="restore-http-1")
+                self.assertEqual(status, 201)
+                self.assertEqual(restored["restoredFromVersionId"], imported["versionId"])
+                self.assertEqual(request(restore_path, "POST", restore_body,
+                    key="restore-http-1")[1]["id"], restored["id"])
+                stale, conflict = request(restore_path, "POST", restore_body, key="restore-http-2")
+                self.assertEqual(stale, 409)
+                self.assertEqual(conflict["error"]["currentHeadVersionId"], restored["id"])
+                self.assertEqual(request(f"/versions/{restored['id']}")[1]["ordinal"], 2)
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

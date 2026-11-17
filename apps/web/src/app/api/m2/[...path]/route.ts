@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const allowed = /^\/(projects(?:\/[a-f0-9-]+(?:\/(?:imports|workspaces))?)?|workspaces\/[a-f0-9-]+(?:\/fork)?|assets\/[a-f0-9-]+\/content)$/;
+const allowed = /^\/(projects(?:\/[a-f0-9-]+(?:\/(?:imports|workspaces|versions))?)?|versions\/[a-f0-9-]+(?:\/restore)?|workspaces\/[a-f0-9-]+(?:\/fork)?|assets\/[a-f0-9-]+\/content)$/;
 
 async function handle(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   const { path } = await context.params;
@@ -21,7 +21,8 @@ async function handle(request: NextRequest, context: { params: Promise<{ path: s
     const body = request.method === 'GET' ? undefined : await request.arrayBuffer();
     const upstream = await fetch(url, {
       method: request.method, body, cache: 'no-store',
-      headers: { 'X-Internal-Token': token, 'Content-Type': request.headers.get('content-type') ?? 'application/json' },
+      headers: { 'X-Internal-Token': token, 'Content-Type': request.headers.get('content-type') ?? 'application/json',
+        'Idempotency-Key': request.headers.get('idempotency-key') ?? '' },
     });
     // Finish reading the localhost response before handing it to Next. A client
     // disconnect must not leave the Python response stream half-consumed.
